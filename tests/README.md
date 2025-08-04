@@ -24,9 +24,10 @@ This directory contains all tests and debugging scripts for the Parquet Analyzer
 - `debug_edge_cases.py` - Debug edge case scenarios
 - `debug_full_flow.py` - Debug full application flow
 - `debug_terminal_sizes.py` - Debug terminal size handling
-- `test_arrow_key_fix.py` - Legacy arrow key navigation test (now using j/k keys instead)
-- `test_navigation.py` - Test navigation keys (j/k keys for reliable navigation)
+- `test_arrow_key_fix.py` - Legacy arrow key navigation test (arrow keys now work again)
+- `test_navigation.py` - Test navigation keys (arrow keys and j/k alternatives)
 - `test_data_pagination.py` - Test data view pagination functionality
+- `test_arrow_keys.py` - Test arrow key sequence detection (low-level)
 
 ### Test Data
 
@@ -73,7 +74,10 @@ Debug scripts are standalone Python scripts that can be run directly to investig
 # From the project root (using virtual environment)
 .venv/bin/python tests/debug_formatting.py
 
-# Test j/k navigation (replaces arrow key navigation)
+# Test arrow key detection (low-level)
+.venv/bin/python tests/test_arrow_keys.py
+
+# Test j/k navigation (fallback navigation)
 .venv/bin/python tests/test_navigation.py
 
 # Test data pagination
@@ -198,6 +202,38 @@ uv run python tests/test_file.py
 # Or activate the virtual environment
 source .venv/bin/activate
 python tests/test_file.py
+```
+
+## Navigation Features
+
+The TUI supports both arrow keys and j/k navigation for maximum compatibility and user preference.
+
+### Arrow Key Navigation (Restored)
+
+Arrow keys now work reliably in both file browser and compression view:
+
+- **File Browser**: Use ↑/↓ arrow keys to navigate through files and folders
+- **Compression View**: Use ↑/↓ arrow keys to navigate between columns
+- **Fallback**: j/k keys also work as vim-style alternatives
+
+### How It Works
+
+The TUI now uses improved escape sequence detection with:
+
+- Short timeouts (50ms) to reliably detect arrow key sequences
+- Fallback to ESC key behavior if arrow sequence is incomplete
+- Robust error handling for terminal compatibility
+- Both arrow keys and j/k work in all contexts
+
+### Testing Arrow Keys
+
+```bash
+# Test low-level arrow key detection
+uv run python tests/test_arrow_keys.py
+
+# Test navigation in actual TUI
+uv run parquet-analyzer tests/test_data/large_test_data.parquet
+# Try both arrow keys and j/k in file browser and compression view
 ```
 
 ## Data Pagination Feature

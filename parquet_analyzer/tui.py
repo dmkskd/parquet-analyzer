@@ -139,7 +139,7 @@ class FileSelector:
     def create_help_panel(self) -> Panel:
         """Create help panel for file selector"""
         help_text = """[bold cyan]File Browser Navigation:[/bold cyan]
-├─ [bold]j/k[/bold]: Navigate files and folders (down/up)
+├─ [bold]↑/↓ or j/k[/bold]: Navigate files and folders
 ├─ [bold]Enter[/bold]: Select file or enter directory
 ├─ [bold]Backspace[/bold]: Go to parent directory
 ├─ [bold].[/bold]: Toggle hidden files
@@ -192,7 +192,7 @@ class FileSelector:
                 if path and not is_dir and path.suffix.lower() in ['.parquet', '.pq']:
                     status += f" | [bold cyan]Selected: {name}[/bold cyan]"
             
-            controls = "[bold green]Controls:[/bold green] [cyan]j/k[/cyan] (navigate) [cyan]Enter[/cyan] (select) [cyan].[/cyan] (hidden) [cyan]q[/cyan] (quit) [cyan]h[/cyan] (help)"
+            controls = "[bold green]Controls:[/bold green] [cyan]↑/↓ or j/k[/cyan] (navigate) [cyan]Enter[/cyan] (select) [cyan].[/cyan] (hidden) [cyan]q[/cyan] (quit) [cyan]h[/cyan] (help)"
             
             self.console.print(f"\n{status}")
             self.console.print(controls)
@@ -245,16 +245,39 @@ class FileSelector:
                         self.selected_index = 0
                         self.scan_directory()
                         needs_update = True
-                elif key == 'k' or key == 'K':  # Up navigation
+                elif key == 'k' or key == 'K':  # Up navigation (fallback)
                     if self.selected_index > 0:
                         self.selected_index -= 1
                         needs_update = True
-                elif key == 'j' or key == 'J':  # Down navigation
+                elif key == 'j' or key == 'J':  # Down navigation (fallback)
                     if self.selected_index < len(self.files_and_dirs) - 1:
                         self.selected_index += 1
                         needs_update = True
-                elif key == '\x1b':  # Escape key - just ignore, don't try to parse arrow keys
-                    pass
+                elif key == '\x1b':  # Escape or arrow key sequence
+                    # More robust arrow key detection
+                    sequence = [key]
+                    try:
+                        # Try to read a complete 3-character arrow sequence
+                        char2 = sys.stdin.read(1)
+                        sequence.append(char2)
+                        if char2 == '[':
+                            char3 = sys.stdin.read(1) 
+                            sequence.append(char3)
+                            
+                            # Check for standard arrow keys
+                            if char3 == 'A':  # Up arrow
+                                if self.selected_index > 0:
+                                    self.selected_index -= 1
+                                    needs_update = True
+                            elif char3 == 'B':  # Down arrow  
+                                if self.selected_index < len(self.files_and_dirs) - 1:
+                                    self.selected_index += 1
+                                    needs_update = True
+                            # Other arrow keys (C=right, D=left) are ignored in file browser
+                        # If not a complete arrow sequence, treat as ESC (ignored)
+                    except (OSError, ValueError):
+                        # If we can't read the sequence, just ignore
+                        pass
                 elif ord(key) == 3:  # Ctrl+C
                     return None
                 
@@ -393,6 +416,9 @@ class ParquetTUI:
         
         # Sort columns by compression ratio (worst first)
         sorted_columns = sorted(self.analysis.columns, key=lambda x: x.compression_ratio, reverse=True)
+        
+        # Ensure selected_column is within bounds
+        self.selected_column = max(0, min(self.selected_column, len(sorted_columns) - 1))
         
         # Limit the number of rows to fit in available space
         displayed_columns = sorted_columns[:max_rows] if len(sorted_columns) > max_rows else sorted_columns
@@ -1267,7 +1293,7 @@ class ParquetTUI:
 ├─ [bold]4[/bold]: Pages - Page-level data organization
 ├─ [bold]5[/bold]: Optimization - Improvement recommendations
 ├─ [bold]6[/bold]: Data - Preview actual data content
-├─ [bold]j/k[/bold]: Navigate columns (Compression) / Page through data (Data view)
+├─ [bold]↑/↓ or j/k[/bold]: Navigate columns (Compression) / Page through data (Data view)
 ├─ [bold]q[/bold]: Quit
 └─ [bold]h[/bold]: Toggle this help
 
@@ -1479,7 +1505,7 @@ class ParquetTUI:
                 total_pages = (self.analysis.total_rows + rows_per_page - 1) // rows_per_page
                 status_text += f" | [bold green]Page:[/bold green] [cyan]{current_page}/{total_pages}[/cyan]"
             
-            controls_text = "[bold green]Controls:[/bold green] [cyan]f[/cyan] <file> [cyan]1[/cyan] <overview> [cyan]2[/cyan] <data> [cyan]3[/cyan] <schema> [cyan]4[/cyan] <compression> [cyan]5[/cyan] <pages> [cyan]6[/cyan] <optimization> [cyan]ESC[/cyan] <back/exit> [cyan]j/k[/cyan] <navigate> [cyan]h[/cyan] <help> [cyan]q[/cyan] <quit>"
+            controls_text = "[bold green]Controls:[/bold green] [cyan]f[/cyan] <file> [cyan]1[/cyan] <overview> [cyan]2[/cyan] <data> [cyan]3[/cyan] <schema> [cyan]4[/cyan] <compression> [cyan]5[/cyan] <pages> [cyan]6[/cyan] <optimization> [cyan]ESC[/cyan] <back/exit> [cyan]↑/↓ or j/k[/cyan] <navigate> [cyan]h[/cyan] <help> [cyan]q[/cyan] <quit>"
             
             self.console.print(f"\n{status_text}")
             self.console.print(controls_text)
@@ -1540,9 +1566,12 @@ class ParquetTUI:
                 elif key == 'j' or key == 'J':
                     # Alternative navigation: j = down (vi-style)
                     if self.current_view == "compression" and self.analysis:
-                        if self.selected_column < len(self.analysis.columns) - 1:
+                        # Make sure we don't go beyond the last column
+                        max_column_index = len(self.analysis.columns) - 1
+                        if self.selected_column < max_column_index:
                             self.selected_column += 1
                             needs_update = True
+                        # Note: we don't need arrow_handled here since this isn't an arrow key
                     elif self.current_view == "data" and self.analysis:
                         # Page down in data view
                         rows_per_page = 20
@@ -1556,6 +1585,7 @@ class ParquetTUI:
                         if self.selected_column > 0:
                             self.selected_column -= 1
                             needs_update = True
+                        # Note: we don't need arrow_handled here since this isn't an arrow key
                     elif self.current_view == "data" and self.analysis:
                         # Page up in data view
                         rows_per_page = 20
@@ -1575,15 +1605,45 @@ class ParquetTUI:
                         else:
                             # If loading failed, show error and continue with current file
                             needs_update = True
-                elif key == '\x1b':  # Escape key - treat as back/exit only
-                    # Don't try to handle arrow keys here - too unreliable
-                    # Use j/k keys for navigation instead
-                    if self.current_view == "overview":
-                        break
-                    else:
-                        self.current_view = "overview"
-                        self.selected_column = 0
-                        needs_update = True
+                elif key == '\x1b':  # Escape or arrow key sequence
+                    # More robust arrow key detection
+                    arrow_handled = False
+                    try:
+                        # Try to read a complete 3-character arrow sequence
+                        char2 = sys.stdin.read(1)
+                        if char2 == '[':
+                            char3 = sys.stdin.read(1)
+                            
+                            # Check for standard arrow keys
+                            if char3 == 'A':  # Up arrow
+                                if self.current_view == "compression" and self.analysis:
+                                    if self.selected_column > 0:
+                                        self.selected_column -= 1
+                                        needs_update = True
+                                    arrow_handled = True  # Mark as handled even if we didn't move
+                            elif char3 == 'B':  # Down arrow
+                                if self.current_view == "compression" and self.analysis:
+                                    # Make sure we don't go beyond the last column
+                                    max_column_index = len(self.analysis.columns) - 1
+                                    if self.selected_column < max_column_index:
+                                        self.selected_column += 1
+                                        needs_update = True
+                                    arrow_handled = True  # Mark as handled even if we didn't move
+                            # Other arrow keys (C=right, D=left) could be handled here if needed
+                        # If not a complete arrow sequence, will fall through to ESC handling
+                    except (OSError, ValueError):
+                        # If we can't read the sequence, treat as ESC
+                        pass
+                    
+                    # If arrow key wasn't handled, treat as ESC (back/exit)
+                    if not arrow_handled:
+                        if self.current_view == "overview":
+                            break
+                        else:
+                            self.current_view = "overview"
+                            self.selected_column = 0
+                            self.data_row_offset = 0
+                            needs_update = True
                 elif ord(key) == 3:  # Ctrl+C
                     break
                 
