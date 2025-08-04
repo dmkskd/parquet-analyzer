@@ -24,14 +24,19 @@ This directory contains all tests and debugging scripts for the Parquet Analyzer
 - `debug_edge_cases.py` - Debug edge case scenarios
 - `debug_full_flow.py` - Debug full application flow
 - `debug_terminal_sizes.py` - Debug terminal size handling
+- `test_arrow_key_fix.py` - Legacy arrow key navigation test (now using j/k keys instead)
+- `test_navigation.py` - Test navigation keys (j/k keys for reliable navigation)
+- `test_data_pagination.py` - Test data view pagination functionality
 
 ### Test Data
 
 - `test_data/` - Directory containing test parquet files and data creation scripts
   - `test_complex_orderbook.parquet` - Complex orderbook data for testing
   - `test_timestamp.parquet` - Timestamp data for testing
+  - `large_test_data.parquet` - Large dataset (100 rows) for pagination testing
   - `create_orderbook_test.py` - Script to create test orderbook data
   - `create_multi_rowgroup_test.py` - Script to create multi-rowgroup test data
+  - `create_large_test.py` - Script to create large test data for pagination
 
 ## Running Tests
 
@@ -67,6 +72,12 @@ Debug scripts are standalone Python scripts that can be run directly to investig
 ```bash
 # From the project root (using virtual environment)
 .venv/bin/python tests/debug_formatting.py
+
+# Test j/k navigation (replaces arrow key navigation)
+.venv/bin/python tests/test_navigation.py
+
+# Test data pagination
+.venv/bin/python tests/test_data_pagination.py
 
 # Or if you have the environment activated
 python tests/debug_formatting.py
@@ -188,3 +199,38 @@ uv run python tests/test_file.py
 source .venv/bin/activate
 python tests/test_file.py
 ```
+
+## Data Pagination Feature
+
+The TUI now supports pagination in the data preview view, allowing you to browse through large datasets efficiently.
+
+### How to Use Data Pagination
+
+1. **Load a Parquet file**: `uv run parquet-analyzer your_file.parquet`
+2. **Switch to data view**: Press `2`
+3. **Navigate through pages**:
+   - Press `j` to go to the next page (page down)
+   - Press `k` to go to the previous page (page up)
+4. **View pagination info**: The title shows current page and row range
+
+### Testing Data Pagination
+
+```bash
+# Create a large test file (100 rows)
+uv run python tests/test_data/create_large_test.py
+
+# Test the pagination functionality
+uv run python tests/test_data_pagination.py
+
+# Interactive test with the large file
+uv run parquet-analyzer tests/test_data/large_test_data.parquet
+# Press '2' to enter data view, then use 'j'/'k' to page through data
+```
+
+### Pagination Details
+
+- **Page size**: 20 rows per page
+- **Navigation**: `j` (next page) / `k` (previous page)
+- **Status display**: Shows current page number and row range
+- **Bounds checking**: Cannot go below page 1 or above the last page
+- **Automatic reset**: Returns to page 1 when switching to data view

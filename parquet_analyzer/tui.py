@@ -139,7 +139,7 @@ class FileSelector:
     def create_help_panel(self) -> Panel:
         """Create help panel for file selector"""
         help_text = """[bold cyan]File Browser Navigation:[/bold cyan]
-├─ [bold]↑/↓[/bold]: Navigate files and folders
+├─ [bold]j/k[/bold]: Navigate files and folders (down/up)
 ├─ [bold]Enter[/bold]: Select file or enter directory
 ├─ [bold]Backspace[/bold]: Go to parent directory
 ├─ [bold].[/bold]: Toggle hidden files
@@ -192,7 +192,7 @@ class FileSelector:
                 if path and not is_dir and path.suffix.lower() in ['.parquet', '.pq']:
                     status += f" | [bold cyan]Selected: {name}[/bold cyan]"
             
-            controls = "[bold green]Controls:[/bold green] [cyan]↑↓[/cyan] (navigate) [cyan]Enter[/cyan] (select) [cyan].[/cyan] (hidden) [cyan]q[/cyan] (quit) [cyan]h[/cyan] (help)"
+            controls = "[bold green]Controls:[/bold green] [cyan]j/k[/cyan] (navigate) [cyan]Enter[/cyan] (select) [cyan].[/cyan] (hidden) [cyan]q[/cyan] (quit) [cyan]h[/cyan] (help)"
             
             self.console.print(f"\n{status}")
             self.console.print(controls)
@@ -245,23 +245,16 @@ class FileSelector:
                         self.selected_index = 0
                         self.scan_directory()
                         needs_update = True
-                elif key == '\x1b':  # Arrow keys
-                    try:
-                        tty.setraw(sys.stdin.fileno())
-                        next1 = sys.stdin.read(1)
-                        next2 = sys.stdin.read(1)
-                    finally:
-                        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-                    
-                    if next1 == '[':
-                        if next2 == 'A':  # Up
-                            if self.selected_index > 0:
-                                self.selected_index -= 1
-                                needs_update = True
-                        elif next2 == 'B':  # Down
-                            if self.selected_index < len(self.files_and_dirs) - 1:
-                                self.selected_index += 1
-                                needs_update = True
+                elif key == 'k' or key == 'K':  # Up navigation
+                    if self.selected_index > 0:
+                        self.selected_index -= 1
+                        needs_update = True
+                elif key == 'j' or key == 'J':  # Down navigation
+                    if self.selected_index < len(self.files_and_dirs) - 1:
+                        self.selected_index += 1
+                        needs_update = True
+                elif key == '\x1b':  # Escape key - just ignore, don't try to parse arrow keys
+                    pass
                 elif ord(key) == 3:  # Ctrl+C
                     return None
                 
@@ -280,6 +273,7 @@ class ParquetTUI:
         self.console = Console()
         self.current_view = "overview"  # overview, data, schema, compression, pages, optimization
         self.selected_column = 0
+        self.data_row_offset = 0  # For data view pagination
         self.analysis: Optional[ParquetAnalysis] = None
         self.analyzer = ParquetAnalyzer()
         
@@ -657,9 +651,15 @@ class ParquetTUI:
             return Panel("No data loaded", title="Data Preview")
         
         try:
-            # Get data sample
+            # Get paginated data sample  
             analyzer = ParquetAnalyzer()
-            df = analyzer.get_data_sample(self.file_path, max_rows=100)
+            rows_per_page = 20  # Show 20 rows at a time
+            df = analyzer.get_data_sample_paginated(self.file_path, max_rows=rows_per_page, offset=self.data_row_offset)
+            
+            # Get total row count for pagination info
+            total_rows = self.analysis.total_rows
+            current_page = (self.data_row_offset // rows_per_page) + 1
+            total_pages = (total_rows + rows_per_page - 1) // rows_per_page  # Ceiling division
             
             # Get terminal size for responsive display
             terminal_width = self.console.size.width
@@ -1169,8 +1169,10 @@ class ParquetTUI:
                         dtype = 'string'
                     info_lines.append(f"   {col}: {dtype}")
             
-            # Create title with summary info
-            title_info = f"📋 Data Preview ({display_rows}/{len(df):,} rows, {len(display_cols)}/{len(df.columns)} cols)"
+            # Create title with pagination info
+            start_row = self.data_row_offset + 1
+            end_row = min(self.data_row_offset + len(df), total_rows)
+            title_info = f"📋 Data Preview (rows {start_row:,}-{end_row:,} of {total_rows:,}, page {current_page}/{total_pages}, {len(display_cols)}/{len(df.columns)} cols)"
             
             return Panel(table, title=title_info, border_style="green")
             
@@ -1265,18 +1267,18 @@ class ParquetTUI:
 ├─ [bold]4[/bold]: Pages - Page-level data organization
 ├─ [bold]5[/bold]: Optimization - Improvement recommendations
 ├─ [bold]6[/bold]: Data - Preview actual data content
-├─ [bold]↑/↓[/bold]: Navigate columns (in Compression view)
+├─ [bold]j/k[/bold]: Navigate columns (Compression) / Page through data (Data view)
 ├─ [bold]q[/bold]: Quit
 └─ [bold]h[/bold]: Toggle this help
 
 [bold cyan]Views:[/bold cyan]
 ├─ [bold]1[/bold]: Overview - File summary and statistics
-├─ [bold]2[/bold]: Schema - Nested structure analysis  
-├─ [bold]3[/bold]: Compression - Column-by-column analysis
-├─ [bold]4[/bold]: Pages - Page-level data organization
-├─ [bold]5[/bold]: Optimization - Improvement recommendations
-├─ [bold]6[/bold]: Data - Preview actual data content
-└─ [bold]↑/↓[/bold]: Navigate columns (in Compression view)"""
+├─ [bold]2[/bold]: Data - Preview actual data content (j/k to page)  
+├─ [bold]3[/bold]: Schema - Nested structure analysis  
+├─ [bold]4[/bold]: Compression - Column-by-column analysis (j/k to navigate)
+├─ [bold]5[/bold]: Pages - Page-level data organization
+├─ [bold]6[/bold]: Optimization - Improvement recommendations
+└─ [bold]j/k[/bold]: Navigate columns (in Compression view)"""
         
         return Panel(help_text, title="❓ Help", border_style="dim")
     
@@ -1471,8 +1473,13 @@ class ParquetTUI:
             status_text = f"[bold green]View:[/bold green] [cyan]{self.current_view.title()}[/cyan]"
             if self.current_view == "compression":
                 status_text += f" | [bold green]Column:[/bold green] [cyan]{self.selected_column + 1}/{len(self.analysis.columns)}[/cyan]"
+            elif self.current_view == "data":
+                rows_per_page = 20
+                current_page = (self.data_row_offset // rows_per_page) + 1
+                total_pages = (self.analysis.total_rows + rows_per_page - 1) // rows_per_page
+                status_text += f" | [bold green]Page:[/bold green] [cyan]{current_page}/{total_pages}[/cyan]"
             
-            controls_text = "[bold green]Controls:[/bold green] [cyan]f[/cyan] <file> [cyan]1[/cyan] <overview> [cyan]2[/cyan] <data> [cyan]3[/cyan] <schema> [cyan]4[/cyan] <compression> [cyan]5[/cyan] <pages> [cyan]6[/cyan] <optimization> [cyan]ESC[/cyan] <back/exit> [cyan]↑↓[/cyan] <navigate> [cyan]h[/cyan] <help> [cyan]q[/cyan] <quit>"
+            controls_text = "[bold green]Controls:[/bold green] [cyan]f[/cyan] <file> [cyan]1[/cyan] <overview> [cyan]2[/cyan] <data> [cyan]3[/cyan] <schema> [cyan]4[/cyan] <compression> [cyan]5[/cyan] <pages> [cyan]6[/cyan] <optimization> [cyan]ESC[/cyan] <back/exit> [cyan]j/k[/cyan] <navigate> [cyan]h[/cyan] <help> [cyan]q[/cyan] <quit>"
             
             self.console.print(f"\n{status_text}")
             self.console.print(controls_text)
@@ -1509,6 +1516,7 @@ class ParquetTUI:
                     if self.current_view != "data":
                         self.current_view = "data"
                         self.selected_column = 0
+                        self.data_row_offset = 0  # Reset to first page
                         needs_update = True
                 elif key == '3':
                     if self.current_view != "schema":
@@ -1529,6 +1537,31 @@ class ParquetTUI:
                         self.current_view = "optimization"
                         self.selected_column = 0
                         needs_update = True
+                elif key == 'j' or key == 'J':
+                    # Alternative navigation: j = down (vi-style)
+                    if self.current_view == "compression" and self.analysis:
+                        if self.selected_column < len(self.analysis.columns) - 1:
+                            self.selected_column += 1
+                            needs_update = True
+                    elif self.current_view == "data" and self.analysis:
+                        # Page down in data view
+                        rows_per_page = 20
+                        max_offset = max(0, self.analysis.total_rows - rows_per_page)
+                        if self.data_row_offset < max_offset:
+                            self.data_row_offset = min(self.data_row_offset + rows_per_page, max_offset)
+                            needs_update = True
+                elif key == 'k' or key == 'K':
+                    # Alternative navigation: k = up (vi-style)
+                    if self.current_view == "compression" and self.analysis:
+                        if self.selected_column > 0:
+                            self.selected_column -= 1
+                            needs_update = True
+                    elif self.current_view == "data" and self.analysis:
+                        # Page up in data view
+                        rows_per_page = 20
+                        if self.data_row_offset > 0:
+                            self.data_row_offset = max(0, self.data_row_offset - rows_per_page)
+                            needs_update = True
                 elif key == 'f' or key == 'F' or key == '0':
                     # File browser - load a new file using the same selector as initial load
                     file_selector = FileSelector()
@@ -1542,56 +1575,15 @@ class ParquetTUI:
                         else:
                             # If loading failed, show error and continue with current file
                             needs_update = True
-                elif key == '\x1b':  # Escape key - handle both standalone and sequences
-                    try:
-                        # Try to detect if this is part of an arrow key sequence
-                        tty.setraw(sys.stdin.fileno())
-                        import select
-                        
-                        # Check for follow-up characters with timeout
-                        if select.select([sys.stdin], [], [], 0.05)[0]:  # 50ms timeout
-                            next_char = sys.stdin.read(1)
-                            if next_char == '[':
-                                # ANSI escape sequence, read the final character
-                                if select.select([sys.stdin], [], [], 0.05)[0]:
-                                    arrow_char = sys.stdin.read(1)
-                                    # Handle arrow keys ONLY in compression view
-                                    if self.current_view == "compression" and self.analysis:
-                                        if arrow_char == 'A':  # Up arrow
-                                            if self.selected_column > 0:
-                                                self.selected_column -= 1
-                                                needs_update = True
-                                            # Don't treat as ESC - just continue
-                                            continue
-                                        elif arrow_char == 'B':  # Down arrow
-                                            if self.selected_column < len(self.analysis.columns) - 1:
-                                                self.selected_column += 1
-                                                needs_update = True
-                                            # Don't treat as ESC - just continue  
-                                            continue
-                        
-                        # If we reach here, treat as standalone ESC
-                        if self.current_view == "overview":
-                            break
-                        else:
-                            self.current_view = "overview"
-                            self.selected_column = 0
-                            needs_update = True
-                            
-                    except Exception:
-                        # Any error - treat as ESC
-                        if self.current_view == "overview":
-                            break
-                        else:
-                            self.current_view = "overview"
-                            self.selected_column = 0
-                            needs_update = True
-                    finally:
-                        # Always restore terminal settings
-                        try:
-                            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-                        except:
-                            pass
+                elif key == '\x1b':  # Escape key - treat as back/exit only
+                    # Don't try to handle arrow keys here - too unreliable
+                    # Use j/k keys for navigation instead
+                    if self.current_view == "overview":
+                        break
+                    else:
+                        self.current_view = "overview"
+                        self.selected_column = 0
+                        needs_update = True
                 elif ord(key) == 3:  # Ctrl+C
                     break
                 

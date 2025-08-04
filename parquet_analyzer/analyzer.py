@@ -227,6 +227,36 @@ class ParquetAnalyzer:
         except Exception as e:
             raise ValueError(f"Error reading data from Parquet file: {e}") from e
 
+    def get_data_sample_paginated(self, file_path: str, max_rows: int = 50, offset: int = 0) -> pd.DataFrame:
+        """Get a paginated sample of the actual data from the Parquet file"""
+        try:
+            import pyarrow.parquet as pq
+            
+            # Read a sample of the data with offset
+            parquet_file = pq.ParquetFile(file_path)
+            total_rows = parquet_file.metadata.num_rows
+            
+            # Calculate actual offset and limit
+            start_row = min(offset, total_rows)
+            end_row = min(start_row + max_rows, total_rows)
+            
+            if start_row >= total_rows:
+                # Return empty DataFrame with correct schema
+                table = pq.read_table(file_path)
+                return table.slice(0, 0).to_pandas()
+            
+            # Read the slice of data
+            table = pq.read_table(file_path, use_threads=True)
+            table = table.slice(start_row, end_row - start_row)
+            
+            # Convert to pandas DataFrame
+            df = table.to_pandas()
+            
+            return df
+            
+        except Exception as e:
+            raise ValueError(f"Error reading data from Parquet file: {e}") from e
+
     def _extract_schema_fields(self, schema: pa.Schema) -> List[SchemaField]:
         """Extract schema fields with full type information"""
         fields = []
