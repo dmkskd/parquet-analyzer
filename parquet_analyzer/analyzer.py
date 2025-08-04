@@ -34,6 +34,48 @@ class PageInfo:
 
 
 @dataclass
+class RowGroupColumnInfo:
+    """Column information within a specific row group"""
+    name: str
+    physical_type: str
+    compression: str
+    uncompressed_size: int
+    compressed_size: int
+    compression_ratio: float
+    min_value: Optional[Any] = None
+    max_value: Optional[Any] = None
+
+
+@dataclass
+class RowGroupInfo:
+    """Information about a specific row group"""
+    index: int
+    num_rows: int
+    total_uncompressed_size: int
+    total_compressed_size: int
+    compression_ratio: float
+    columns: List[RowGroupColumnInfo]
+    
+    def get_min_max_hint(self) -> str:
+        """Get a hint about min/max values across columns"""
+        if not self.columns:
+            return "No column data"
+        
+        # Find columns with interesting min/max ranges
+        interesting_cols = []
+        for col in self.columns[:3]:  # Show first 3 columns
+            if col.min_value is not None and col.max_value is not None:
+                min_str = str(col.min_value)[:10]
+                max_str = str(col.max_value)[:10]
+                interesting_cols.append(f"{col.name[:8]}: {min_str}→{max_str}")
+        
+        if interesting_cols:
+            return "; ".join(interesting_cols)
+        else:
+            return "No range data available"
+
+
+@dataclass  
 class ColumnInfo:
     """Comprehensive information about a column"""
     name: str
@@ -48,12 +90,12 @@ class ColumnInfo:
     distinct_count: Optional[int] = None
     min_value: Any = None
     max_value: Any = None
-    encodings: List[str] = None
-    num_pages: int = 0
-    pages: List[PageInfo] = None
-    path_in_schema: str = ""
-    repetition_type: str = ""
-    converted_type: str = ""
+    encodings: Optional[List[str]] = None
+    num_pages: Optional[int] = None
+    pages: Optional[List[PageInfo]] = None
+    path_in_schema: Optional[str] = None
+    repetition_type: Optional[str] = None
+    converted_type: Optional[str] = None
 
     def __post_init__(self):
         if self.encodings is None:
@@ -114,6 +156,7 @@ class ParquetAnalysis:
     num_row_groups: int
     num_logical_columns: int
     num_physical_columns: int
+    row_groups: List[RowGroupInfo] = None
     created_by: Optional[str] = None
     version: Optional[str] = None
 
@@ -175,7 +218,10 @@ class ParquetAnalyzer:
             schema_fields = self._extract_schema_fields(table.schema)
             
             # Analyze columns
-            columns = self._analyze_columns(metadata)
+            columns = self._analyze_columns(metadata, table.schema)
+            
+            # Analyze row groups
+            row_groups = self._analyze_row_groups(metadata)
             
             # Calculate totals
             total_uncompressed = sum(col.uncompressed_size for col in columns)
@@ -196,6 +242,7 @@ class ParquetAnalyzer:
                 num_row_groups=metadata.num_row_groups,
                 num_logical_columns=len(schema_fields),
                 num_physical_columns=len(columns),
+                row_groups=row_groups,
                 created_by=str(created_by) if created_by else None,
                 version=str(version) if version else None
             )
@@ -345,7 +392,37 @@ class ParquetAnalyzer:
         
         return "UNKNOWN"
 
-    def _analyze_columns(self, metadata) -> List[ColumnInfo]:
+    def _get_logical_type_from_arrow_schema(self, column_name: str, arrow_schema) -> str:
+        """Get logical type from Arrow schema for a specific column"""
+        for field in arrow_schema:
+            if field.name == column_name:
+                arrow_type = field.type
+                
+                # Map Arrow types to logical type names
+                if pa.types.is_string(arrow_type):
+                    return "UTF8"
+                elif pa.types.is_timestamp(arrow_type):
+                    return f"TIMESTAMP({arrow_type.unit})"
+                elif pa.types.is_date(arrow_type):
+                    return "DATE"
+                elif pa.types.is_time(arrow_type):
+                    return f"TIME({arrow_type.unit})"
+                elif pa.types.is_decimal(arrow_type):
+                    return f"DECIMAL({arrow_type.precision},{arrow_type.scale})"
+                elif pa.types.is_list(arrow_type):
+                    return "LIST"
+                elif pa.types.is_struct(arrow_type):
+                    return "STRUCT"
+                elif pa.types.is_binary(arrow_type):
+                    return "BINARY"
+                else:
+                    # For basic types, return the physical type equivalent
+                    return self._get_physical_type(arrow_type)
+        
+        # Fallback if column not found in schema
+        return "UNKNOWN"
+
+    def _analyze_columns(self, metadata, arrow_schema) -> List[ColumnInfo]:
         """Analyze all columns in the Parquet file"""
         # Aggregate column statistics across all row groups
         column_stats = {}
@@ -363,7 +440,7 @@ class ParquetAnalyzer:
                 stats = self._extract_column_statistics(col)
                 
                 # Get type information
-                logical_type = self._get_logical_type_name(col)
+                logical_type = self._get_logical_type_from_arrow_schema(col_path, arrow_schema)
                 
                 if col_path not in column_stats:
                     # First time seeing this column
@@ -446,6 +523,57 @@ class ParquetAnalyzer:
         
         return columns
 
+    def _analyze_row_groups(self, metadata) -> List[RowGroupInfo]:
+        """Analyze individual row groups"""
+        row_groups = []
+        
+        for i in range(metadata.num_row_groups):
+            rg = metadata.row_group(i)
+            
+            # Calculate row group totals
+            total_uncompressed = 0
+            total_compressed = 0
+            columns = []
+            
+            for j in range(rg.num_columns):
+                col = rg.column(j)
+                
+                # Extract statistics for this column in this row group
+                stats = self._extract_column_statistics(col)
+                logical_type = self._get_logical_type_name(col)
+                
+                ratio = col.total_compressed_size / col.total_uncompressed_size if col.total_uncompressed_size > 0 else 0
+                
+                rg_col_info = RowGroupColumnInfo(
+                    name=col.path_in_schema,
+                    physical_type=col.physical_type,
+                    compression=col.compression,
+                    uncompressed_size=col.total_uncompressed_size,
+                    compressed_size=col.total_compressed_size,
+                    compression_ratio=ratio,
+                    min_value=stats.get('min_value'),
+                    max_value=stats.get('max_value')
+                )
+                columns.append(rg_col_info)
+                
+                total_uncompressed += col.total_uncompressed_size
+                total_compressed += col.total_compressed_size
+            
+            # Calculate row group compression ratio
+            rg_ratio = total_compressed / total_uncompressed if total_uncompressed > 0 else 0
+            
+            row_group_info = RowGroupInfo(
+                index=i,
+                num_rows=rg.num_rows,
+                total_uncompressed_size=total_uncompressed,
+                total_compressed_size=total_compressed,
+                compression_ratio=rg_ratio,
+                columns=columns
+            )
+            row_groups.append(row_group_info)
+        
+        return row_groups
+
     def _extract_page_info(self, col) -> Tuple[List[PageInfo], int]:
         """Extract page-level information from a column"""
         pages = []
@@ -520,11 +648,14 @@ class ParquetAnalyzer:
     def _get_logical_type_name(self, col) -> str:
         """Get the logical type name for a column"""
         if hasattr(col, 'logical_type') and col.logical_type:
-            return str(col.logical_type)
-        elif hasattr(col, 'converted_type') and col.converted_type:
-            return str(col.converted_type)
-        else:
-            return col.physical_type
+            logical_type_str = str(col.logical_type)
+            if logical_type_str and logical_type_str != "None":
+                return logical_type_str
+        if hasattr(col, 'converted_type') and col.converted_type:
+            converted_type_str = str(col.converted_type)
+            if converted_type_str and converted_type_str != "None":
+                return converted_type_str
+        return col.physical_type
 
     def compare_with_parquet_tools(self, file_path: str) -> Optional[Dict[str, Any]]:
         """

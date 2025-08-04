@@ -294,9 +294,15 @@ class ParquetTUI:
     def __init__(self, file_path: str):
         self.file_path = file_path
         self.console = Console()
-        self.current_view = "overview"  # overview, data, schema, compression, pages, optimization
+        self.current_view = "overview"  # overview, data, schema, rowgroups, pages, optimization
         self.selected_column = 0
         self.data_row_offset = 0  # For data view pagination
+        
+        # Row groups view navigation state
+        self.compression_level = "file"  # "file", "rowgroups", "rowgroup_detail"
+        self.selected_rowgroup = 0
+        self.selected_rowgroup_column = 0
+        
         self.analysis: Optional[ParquetAnalysis] = None
         self.analyzer = ParquetAnalyzer()
         
@@ -386,7 +392,21 @@ class ParquetTUI:
         return Panel(tree, title="🏗️ Schema Structure", border_style="green")
     
     def create_compression_panel(self) -> Panel:
-        """Create the compression analysis panel"""
+        """Create the row groups analysis panel with hierarchical navigation"""
+        if not self.analysis:
+            return Panel("No data loaded", title="Row Groups")
+        
+        if self.compression_level == "file":
+            return self._create_file_compression_panel()
+        elif self.compression_level == "rowgroups":
+            return self._create_rowgroups_browser_panel()
+        elif self.compression_level == "rowgroup_detail":
+            return self._create_rowgroup_detail_panel()
+        else:
+            return Panel(f"Invalid view state: {self.compression_level}", title=f"DEBUG: {self.compression_level}")
+
+    def _create_file_compression_panel(self) -> Panel:
+        """Create the file-level compression overview"""
         if not self.analysis:
             return Panel("No data loaded", title="Compression")
         
@@ -402,12 +422,35 @@ class ParquetTUI:
         # - Help panel space buffer (2 lines)
         reserved_space = 12  # Conservative estimate
         available_height = max(3, terminal_height - reserved_space)
-        max_rows = max(1, available_height - 2)  # Reserve space for table header
+        max_rows = max(1, available_height - 6)  # Reserve more space for summary
+        
+        # Create summary section first
+        summary_lines = []
+        total_compressed_mb = self.analysis.total_compressed / (1024 * 1024)
+        total_uncompressed_mb = self.analysis.total_uncompressed / (1024 * 1024)
+        overall_ratio = self.analysis.total_compressed / self.analysis.total_uncompressed if self.analysis.total_uncompressed > 0 else 0
+        
+        summary_lines.append(f"[bold blue]📁 File Overview:[/bold blue] {total_compressed_mb:.1f}MB compressed ({overall_ratio:.1%})")
+        summary_lines.append(f"[bold green]📊 Row Groups:[/bold green] {self.analysis.num_row_groups} groups, avg {total_compressed_mb/self.analysis.num_row_groups:.1f}MB each")
+        
+        # Find best and worst columns
+        sorted_columns = sorted(self.analysis.columns, key=lambda x: x.compression_ratio)
+        best_col = sorted_columns[0] if sorted_columns else None
+        worst_col = sorted_columns[-1] if sorted_columns else None
+        
+        if best_col:
+            summary_lines.append(f"[bold green]🎯 Best compression:[/bold green] {best_col.name[:30]} ({best_col.compression_ratio:.1%})")
+        if worst_col:
+            summary_lines.append(f"[bold red]⚠️ Worst compression:[/bold red] {worst_col.name[:30]} ({worst_col.compression_ratio:.1%})")
+        
+        summary_lines.append("")
+        summary_lines.append("[bold cyan]Navigation:[/bold cyan] ↑/↓ (columns) → (drill into row groups) ← (back)")
+        summary_text = "\n".join(summary_lines)
         
         # Create table for compression details
         table = Table(show_header=True, header_style="bold magenta", box=box.ROUNDED)
         table.add_column("Column", style="cyan", width=col_width, no_wrap=False)
-        table.add_column("Type", style="white", width=8)
+        table.add_column("Physical Type", style="white", width=12)
         table.add_column("Compression", style="yellow", width=10)
         table.add_column("Uncompressed", style="blue", width=11)
         table.add_column("Compressed", style="green", width=11)
@@ -461,12 +504,155 @@ class ParquetTUI:
                 style=style
             )
         
+        # Add summary as table footer
+        table.caption = summary_text
+        
         # Add note if columns were truncated
-        title = "🗜️ Compression Analysis (Worst First)"
+        title = "�️ Row Groups Analysis - File Level (Worst First)"
         if len(sorted_columns) > max_rows:
             title += f" - Showing {len(displayed_columns)}/{len(sorted_columns)} columns"
         
         return Panel(table, title=title, border_style="red")
+
+    def _create_rowgroups_browser_panel(self) -> Panel:
+        """Create the row groups browser panel"""
+        if not self.analysis or not self.analysis.row_groups:
+            return Panel("No row group data available", title="Row Groups")
+        
+        # Get terminal size for responsive layout
+        terminal_width = self.console.size.width
+        terminal_height = self.console.size.height
+        
+        # Reserve space for UI
+        reserved_space = 12
+        available_height = max(3, terminal_height - reserved_space)
+        max_rows = max(1, available_height - 4)
+        
+        # Create table for row groups
+        table = Table(show_header=True, header_style="bold blue", box=box.ROUNDED)
+        table.add_column("RG#", style="cyan", width=4)
+        table.add_column("Rows", style="white", width=8)
+        table.add_column("Uncompressed", style="blue", width=12)
+        table.add_column("Compressed", style="green", width=12)
+        table.add_column("Ratio", style="red", width=7)
+        table.add_column("Min/Max Hint", style="yellow", no_wrap=False)
+        
+        # Ensure selected_rowgroup is within bounds
+        self.selected_rowgroup = max(0, min(self.selected_rowgroup, len(self.analysis.row_groups) - 1))
+        
+        # Show row groups (potentially paginated)
+        displayed_rgs = self.analysis.row_groups[:max_rows] if len(self.analysis.row_groups) > max_rows else self.analysis.row_groups
+        
+        for i, rg in enumerate(displayed_rgs):
+            is_selected = i == self.selected_rowgroup
+            style = "bold white on blue" if is_selected else None
+            
+            def format_size(size_bytes):
+                mb = size_bytes / (1024 * 1024)
+                if mb >= 1:
+                    return f"{mb:.1f}MB"
+                else:
+                    kb = size_bytes / 1024
+                    return f"{kb:.0f}KB" if kb >= 1 else f"{size_bytes}B"
+            
+            table.add_row(
+                str(rg.index),
+                f"{rg.num_rows:,}",
+                format_size(rg.total_uncompressed_size),
+                format_size(rg.total_compressed_size),
+                f"{rg.compression_ratio:.1%}",
+                rg.get_min_max_hint(),
+                style=style
+            )
+        
+        title = f"🗜️ Row Group Browser - MAIN PANEL ({len(self.analysis.row_groups)} row groups)"
+        if len(self.analysis.row_groups) > max_rows:
+            title += f" - Showing {len(displayed_rgs)}/{len(self.analysis.row_groups)}"
+        
+        footer_text = "[bold cyan]Navigation:[/bold cyan] ↑/↓ (row groups) → (drill into columns) ← (back to file)"
+        table.caption = footer_text
+        
+        return Panel(table, title=title, border_style="blue")
+
+    def _create_rowgroup_detail_panel(self) -> Panel:
+        """Create the detailed view of a specific row group"""
+        if not self.analysis or not self.analysis.row_groups:
+            return Panel("No row group data available", title="Row Group Detail")
+        
+        if self.selected_rowgroup >= len(self.analysis.row_groups):
+            return Panel("Invalid row group selected", title="Row Group Detail")
+        
+        rg = self.analysis.row_groups[self.selected_rowgroup]
+        
+        # Get terminal size
+        terminal_width = self.console.size.width
+        terminal_height = self.console.size.height
+        col_width = max(15, (terminal_width - 90) // 2)
+        
+        reserved_space = 12
+        available_height = max(3, terminal_height - reserved_space)
+        max_rows = max(1, available_height - 3)
+        
+        # Create table for row group columns
+        table = Table(show_header=True, header_style="bold magenta", box=box.ROUNDED)
+        table.add_column("Column", style="cyan", width=col_width, no_wrap=False)
+        table.add_column("Type", style="white", width=6)
+        table.add_column("Uncompressed", style="blue", width=11)
+        table.add_column("Compressed", style="green", width=11)
+        table.add_column("Ratio", style="red", width=6)
+        table.add_column("Min → Max", style="yellow", no_wrap=False)
+        
+        # Ensure selected_rowgroup_column is within bounds
+        self.selected_rowgroup_column = max(0, min(self.selected_rowgroup_column, len(rg.columns) - 1))
+        
+        # Sort columns by compression ratio (worst first)
+        sorted_columns = sorted(rg.columns, key=lambda x: x.compression_ratio, reverse=True)
+        displayed_columns = sorted_columns[:max_rows] if len(sorted_columns) > max_rows else sorted_columns
+        
+        for i, col in enumerate(displayed_columns):
+            # Highlight selected column
+            original_index = sorted_columns.index(col)
+            is_selected = original_index == self.selected_rowgroup_column
+            style = "bold white on blue" if is_selected else None
+            
+            # Truncate column name
+            if len(col.name) > col_width - 3:
+                col_name = "..." + col.name[-(col_width-6):]
+            else:
+                col_name = col.name
+            
+            # Format min/max values
+            min_max_str = "No range data"
+            if col.min_value is not None and col.max_value is not None:
+                min_str = str(col.min_value)[:15]
+                max_str = str(col.max_value)[:15]
+                min_max_str = f"{min_str} → {max_str}"
+            
+            def format_size(size_bytes):
+                mb = size_bytes / (1024 * 1024)
+                kb = size_bytes / 1024
+                if mb >= 1:
+                    return f"{mb:.1f}MB"
+                elif kb >= 1:
+                    return f"{kb:.0f}KB"
+                else:
+                    return f"{size_bytes}B"
+            
+            table.add_row(
+                col_name,
+                col.physical_type[:6],
+                format_size(col.uncompressed_size),
+                format_size(col.compressed_size),
+                f"{col.compression_ratio:.1%}",
+                min_max_str,
+                style=style
+            )
+        
+        title = f"🗜️ Row Group {rg.index} - Column Details ({rg.num_rows:,} rows)"
+        footer_text = "[bold cyan]Navigation:[/bold cyan] ↑/↓ (columns) ← (back to row groups) ESC (file level)"
+        table.caption = footer_text
+        
+        return Panel(table, title=title, border_style="magenta")
     
     def create_pages_panel(self) -> Panel:
         """Create the page-level analysis panel"""
@@ -1227,7 +1413,8 @@ class ParquetTUI:
         # Compact name display
         name_display = col.name if len(col.name) <= 25 else col.name[:22] + "..."
         table.add_row("📝 Name", name_display)
-        table.add_row("🔤 Type", col.physical_type)
+        table.add_row("🔤 Physical", col.physical_type)
+        table.add_row("🏷️ Logical", col.logical_type)
         table.add_row("🗜️ Compress", col.compression)
         
         # Compact encodings
@@ -1289,11 +1476,11 @@ class ParquetTUI:
 ├─ [bold]f[/bold]: File Browser - Load a different Parquet file
 ├─ [bold]1[/bold]: Overview - File summary and basic statistics
 ├─ [bold]2[/bold]: Schema - Nested structure and field types  
-├─ [bold]3[/bold]: Compression - Column analysis with navigation
+├─ [bold]3[/bold]: Row Groups - Compression analysis with navigation
 ├─ [bold]4[/bold]: Pages - Page-level data organization
 ├─ [bold]5[/bold]: Optimization - Improvement recommendations
 ├─ [bold]6[/bold]: Data - Preview actual data content
-├─ [bold]↑/↓ or j/k[/bold]: Navigate columns (Compression) / Page through data (Data view)
+├─ [bold]↑/↓ or j/k[/bold]: Navigate columns (Row Groups) / Page through data (Data view)
 ├─ [bold]q[/bold]: Quit
 └─ [bold]h[/bold]: Toggle this help
 
@@ -1304,9 +1491,123 @@ class ParquetTUI:
 ├─ [bold]4[/bold]: Compression - Column-by-column analysis (j/k to navigate)
 ├─ [bold]5[/bold]: Pages - Page-level data organization
 ├─ [bold]6[/bold]: Optimization - Improvement recommendations
-└─ [bold]j/k[/bold]: Navigate columns (in Compression view)"""
+└─ [bold]j/k[/bold]: Navigate columns (in Row Groups view)"""
         
         return Panel(help_text, title="❓ Help", border_style="dim")
+    
+    def create_rowgroup_summary_panel(self) -> Panel:
+        """Create summary panel for selected row group"""
+        if not self.analysis or not self.analysis.row_groups:
+            return Panel("No row group data", title="Row Group Summary")
+        
+        if self.selected_rowgroup >= len(self.analysis.row_groups):
+            return Panel("Invalid row group selected", title="Row Group Summary")
+        
+        rg = self.analysis.row_groups[self.selected_rowgroup]
+        
+        table = Table(show_header=False, box=box.SIMPLE, padding=(0, 1))
+        table.add_column("Property", style="bold cyan", no_wrap=True)
+        table.add_column("Value", style="white", no_wrap=False)
+        
+        def format_bytes(b):
+            mb = b / (1024 * 1024)
+            kb = b / 1024
+            if mb >= 1:
+                return f"{mb:.1f}MB"
+            elif kb >= 1:
+                return f"{kb:.0f}KB"
+            else:
+                return f"{b}B"
+        
+        table.add_row("🗂️ Row Group", f"#{rg.index}")
+        table.add_row("📊 Rows", f"{rg.num_rows:,}")
+        table.add_row("🔢 Columns", f"{len(rg.columns)}")
+        table.add_row("📏 Uncompr", format_bytes(rg.total_uncompressed_size))
+        table.add_row("📦 Compr", format_bytes(rg.total_compressed_size))
+        table.add_row("📈 Ratio", f"{rg.compression_ratio:.1%}")
+        table.add_row("💰 Saved", format_bytes(rg.total_uncompressed_size - rg.total_compressed_size))
+        
+        # Show best and worst columns in this row group
+        sorted_cols = sorted(rg.columns, key=lambda x: x.compression_ratio)
+        if sorted_cols:
+            best_col = sorted_cols[0]
+            worst_col = sorted_cols[-1]
+            table.add_row("🎯 Best Col", f"{best_col.name[:12]}... ({best_col.compression_ratio:.1%})")
+            table.add_row("⚠️ Worst Col", f"{worst_col.name[:12]}... ({worst_col.compression_ratio:.1%})")
+        
+        # Show hint about min/max
+        hint = rg.get_min_max_hint()
+        if len(hint) > 40:
+            hint = hint[:37] + "..."
+        table.add_row("📋 Ranges", hint)
+        
+        return Panel(table, title=f"🗂️ Row Group {rg.index} Summary - SIDE PANEL", border_style="blue")
+    
+    def create_rowgroup_column_detail_panel(self) -> Panel:
+        """Create detailed view of selected column in selected row group"""
+        if not self.analysis or not self.analysis.row_groups:
+            return Panel("No row group data", title="Column Details")
+        
+        if self.selected_rowgroup >= len(self.analysis.row_groups):
+            return Panel("Invalid row group selected", title="Column Details")
+        
+        rg = self.analysis.row_groups[self.selected_rowgroup]
+        
+        if self.selected_rowgroup_column >= len(rg.columns):
+            return Panel("No column selected", title="Column Details")
+        
+        # Sort columns by compression ratio (worst first) to match main display
+        sorted_columns = sorted(rg.columns, key=lambda x: x.compression_ratio, reverse=True)
+        col = sorted_columns[self.selected_rowgroup_column]
+        
+        table = Table(show_header=False, box=box.SIMPLE, padding=(0, 1))
+        table.add_column("Property", style="bold magenta", no_wrap=True)
+        table.add_column("Value", style="white", no_wrap=False)
+        
+        def format_bytes(b):
+            mb = b / (1024 * 1024)
+            kb = b / 1024
+            if mb >= 1:
+                return f"{mb:.1f}MB"
+            elif kb >= 1:
+                return f"{kb:.0f}KB"
+            else:
+                return f"{b}B"
+        
+        # Compact name display
+        name_display = col.name if len(col.name) <= 20 else col.name[:17] + "..."
+        table.add_row("📝 Column", name_display)
+        table.add_row("🗂️ Row Group", f"#{rg.index}")
+        table.add_row("🔤 Type", col.physical_type[:10])
+        table.add_row("🗜️ Compression", col.compression[:12])
+        table.add_row("📏 Uncompr", format_bytes(col.uncompressed_size))
+        table.add_row("📦 Compr", format_bytes(col.compressed_size))
+        table.add_row("📈 Ratio", f"{col.compression_ratio:.1%}")
+        table.add_row("💰 Saved", format_bytes(col.uncompressed_size - col.compressed_size))
+        
+        # Min/Max values (key for query optimization)
+        if col.min_value is not None and col.max_value is not None:
+            min_str = str(col.min_value)[:15] + "..." if len(str(col.min_value)) > 15 else str(col.min_value)
+            max_str = str(col.max_value)[:15] + "..." if len(str(col.max_value)) > 15 else str(col.max_value)
+            table.add_row("📉 Min Value", min_str)
+            table.add_row("📈 Max Value", max_str)
+            
+            # Calculate range info for query optimization
+            try:
+                if isinstance(col.min_value, (int, float)) and isinstance(col.max_value, (int, float)):
+                    range_size = col.max_value - col.min_value
+                    table.add_row("📏 Range", f"{range_size:,.2f}")
+            except:
+                pass
+        else:
+            table.add_row("📊 Range", "No statistics")
+        
+        # Row group specific stats
+        rg_coverage = (col.uncompressed_size / rg.total_uncompressed_size) * 100 if rg.total_uncompressed_size > 0 else 0
+        table.add_row("📊 RG Coverage", f"{rg_coverage:.1f}%")
+        
+        title = f"🔍 {col.name[:15]}..." if len(col.name) > 15 else f"🔍 {col.name}"
+        return Panel(table, title=title, border_style="magenta")
     
     def create_layout(self, show_help: bool = False) -> Layout:
         """Create the main layout"""
@@ -1325,11 +1626,28 @@ class ParquetTUI:
             main_layout.update(self.create_overview_panel())
         elif self.current_view == "schema":
             main_layout.update(self.create_schema_panel())
-        elif self.current_view == "compression":
-            main_layout.split_row(
-                Layout(self.create_compression_panel(), ratio=2),
-                Layout(self.create_column_detail_panel(), ratio=1)
-            )
+        elif self.current_view == "rowgroups":
+            if self.compression_level == "file":
+                # File level: show compression panel + column detail
+                main_layout.split_row(
+                    Layout(self.create_compression_panel(), ratio=2),
+                    Layout(self.create_column_detail_panel(), ratio=1)
+                )
+            elif self.compression_level == "rowgroups":
+                # Row groups level: show row groups browser + row group detail
+                main_layout.split_row(
+                    Layout(self.create_compression_panel(), ratio=2),
+                    Layout(self.create_rowgroup_summary_panel(), ratio=1)
+                )
+            elif self.compression_level == "rowgroup_detail":
+                # Row group detail: show column details + selected column info
+                main_layout.split_row(
+                    Layout(self.create_compression_panel(), ratio=2),
+                    Layout(self.create_rowgroup_column_detail_panel(), ratio=1)
+                )
+            else:
+                # Fallback
+                main_layout.update(self.create_compression_panel())
         elif self.current_view == "pages":
             main_layout.update(self.create_pages_panel())
         elif self.current_view == "optimization":
@@ -1460,16 +1778,18 @@ class ParquetTUI:
             elif self.current_view == "schema":
                 panel = self.create_schema_panel()
                 self.console.print(panel)
-            elif self.current_view == "compression":
+            elif self.current_view == "rowgroups":
                 # Print compression panel directly instead of using Layout to save vertical space
                 compression_panel = self.create_compression_panel()
                 self.console.print(compression_panel)
                 
                 # Show column detail in a separate smaller panel
                 if self.analysis and self.analysis.columns:
-                    selected_col = self.analysis.columns[min(self.selected_column, len(self.analysis.columns) - 1)]
+                    sorted_columns = sorted(self.analysis.columns, key=lambda x: x.compression_ratio, reverse=True)
+                    selected_col = sorted_columns[min(self.selected_column, len(sorted_columns) - 1)]
                     detail_content = f"[bold cyan]{selected_col.name}[/bold cyan]\n"
                     detail_content += f"Physical Type: {selected_col.physical_type}\n"
+                    detail_content += f"Logical Type: {selected_col.logical_type}\n"
                     detail_content += f"Encodings: {', '.join(selected_col.encodings)}\n"
                     if selected_col.min_value is not None:
                         detail_content += f"Min: {selected_col.min_value}\n"
@@ -1497,15 +1817,15 @@ class ParquetTUI:
             
             # Status and controls at bottom
             status_text = f"[bold green]View:[/bold green] [cyan]{self.current_view.title()}[/cyan]"
-            if self.current_view == "compression":
-                status_text += f" | [bold green]Column:[/bold green] [cyan]{self.selected_column + 1}/{len(self.analysis.columns)}[/cyan]"
+            if self.current_view == "rowgroups":
+                status_text += f" | [bold green]Level:[/bold green] [cyan]{self.compression_level}[/cyan] | [bold green]Column:[/bold green] [cyan]{self.selected_column + 1}/{len(self.analysis.columns)}[/cyan]"
             elif self.current_view == "data":
                 rows_per_page = 20
                 current_page = (self.data_row_offset // rows_per_page) + 1
                 total_pages = (self.analysis.total_rows + rows_per_page - 1) // rows_per_page
                 status_text += f" | [bold green]Page:[/bold green] [cyan]{current_page}/{total_pages}[/cyan]"
             
-            controls_text = "[bold green]Controls:[/bold green] [cyan]f[/cyan] <file> [cyan]1[/cyan] <overview> [cyan]2[/cyan] <data> [cyan]3[/cyan] <schema> [cyan]4[/cyan] <compression> [cyan]5[/cyan] <pages> [cyan]6[/cyan] <optimization> [cyan]ESC[/cyan] <back/exit> [cyan]↑/↓ or j/k[/cyan] <navigate> [cyan]h[/cyan] <help> [cyan]q[/cyan] <quit>"
+            controls_text = "[bold green]Controls:[/bold green] [cyan]f[/cyan] <file> [cyan]1[/cyan] <overview> [cyan]2[/cyan] <data> [cyan]3[/cyan] <schema> [cyan]4[/cyan] <row groups> [cyan]5[/cyan] <pages> [cyan]6[/cyan] <optimization> [cyan]ESC[/cyan] <back/exit> [cyan]↑/↓ or j/k[/cyan] <navigate> [cyan]h[/cyan] <help> [cyan]q[/cyan] <quit>"
             
             self.console.print(f"\n{status_text}")
             self.console.print(controls_text)
@@ -1550,8 +1870,8 @@ class ParquetTUI:
                         self.selected_column = 0
                         needs_update = True
                 elif key == '4':
-                    if self.current_view != "compression":
-                        self.current_view = "compression"
+                    if self.current_view != "rowgroups":
+                        self.current_view = "rowgroups"
                         needs_update = True
                 elif key == '5':
                     if self.current_view != "pages":
@@ -1565,13 +1885,23 @@ class ParquetTUI:
                         needs_update = True
                 elif key == 'j' or key == 'J':
                     # Alternative navigation: j = down (vi-style)
-                    if self.current_view == "compression" and self.analysis:
-                        # Make sure we don't go beyond the last column
-                        max_column_index = len(self.analysis.columns) - 1
-                        if self.selected_column < max_column_index:
-                            self.selected_column += 1
-                            needs_update = True
-                        # Note: we don't need arrow_handled here since this isn't an arrow key
+                    if self.current_view == "rowgroups" and self.analysis:
+                        if self.compression_level == "file":
+                            max_column_index = len(self.analysis.columns) - 1
+                            if self.selected_column < max_column_index:
+                                self.selected_column += 1
+                                needs_update = True
+                        elif self.compression_level == "rowgroups":
+                            max_rg_index = len(self.analysis.row_groups) - 1
+                            if self.selected_rowgroup < max_rg_index:
+                                self.selected_rowgroup += 1
+                                needs_update = True
+                        elif self.compression_level == "rowgroup_detail":
+                            rg = self.analysis.row_groups[self.selected_rowgroup]
+                            max_col_index = len(rg.columns) - 1
+                            if self.selected_rowgroup_column < max_col_index:
+                                self.selected_rowgroup_column += 1
+                                needs_update = True
                     elif self.current_view == "data" and self.analysis:
                         # Page down in data view
                         rows_per_page = 20
@@ -1581,11 +1911,19 @@ class ParquetTUI:
                             needs_update = True
                 elif key == 'k' or key == 'K':
                     # Alternative navigation: k = up (vi-style)
-                    if self.current_view == "compression" and self.analysis:
-                        if self.selected_column > 0:
-                            self.selected_column -= 1
-                            needs_update = True
-                        # Note: we don't need arrow_handled here since this isn't an arrow key
+                    if self.current_view == "rowgroups" and self.analysis:
+                        if self.compression_level == "file":
+                            if self.selected_column > 0:
+                                self.selected_column -= 1
+                                needs_update = True
+                        elif self.compression_level == "rowgroups":
+                            if self.selected_rowgroup > 0:
+                                self.selected_rowgroup -= 1
+                                needs_update = True
+                        elif self.compression_level == "rowgroup_detail":
+                            if self.selected_rowgroup_column > 0:
+                                self.selected_rowgroup_column -= 1
+                                needs_update = True
                     elif self.current_view == "data" and self.analysis:
                         # Page up in data view
                         rows_per_page = 20
@@ -1616,20 +1954,67 @@ class ParquetTUI:
                             
                             # Check for standard arrow keys
                             if char3 == 'A':  # Up arrow
-                                if self.current_view == "compression" and self.analysis:
-                                    if self.selected_column > 0:
-                                        self.selected_column -= 1
-                                        needs_update = True
-                                    arrow_handled = True  # Mark as handled even if we didn't move
+                                if self.current_view == "rowgroups" and self.analysis:
+                                    if self.compression_level == "file":
+                                        if self.selected_column > 0:
+                                            self.selected_column -= 1
+                                            needs_update = True
+                                    elif self.compression_level == "rowgroups":
+                                        if self.selected_rowgroup > 0:
+                                            self.selected_rowgroup -= 1
+                                            needs_update = True
+                                    elif self.compression_level == "rowgroup_detail":
+                                        if self.selected_rowgroup_column > 0:
+                                            self.selected_rowgroup_column -= 1
+                                            needs_update = True
+                                    arrow_handled = True
                             elif char3 == 'B':  # Down arrow
-                                if self.current_view == "compression" and self.analysis:
-                                    # Make sure we don't go beyond the last column
-                                    max_column_index = len(self.analysis.columns) - 1
-                                    if self.selected_column < max_column_index:
-                                        self.selected_column += 1
+                                if self.current_view == "rowgroups" and self.analysis:
+                                    if self.compression_level == "file":
+                                        max_column_index = len(self.analysis.columns) - 1
+                                        if self.selected_column < max_column_index:
+                                            self.selected_column += 1
+                                            needs_update = True
+                                    elif self.compression_level == "rowgroups":
+                                        max_rg_index = len(self.analysis.row_groups) - 1
+                                        if self.selected_rowgroup < max_rg_index:
+                                            self.selected_rowgroup += 1
+                                            needs_update = True
+                                    elif self.compression_level == "rowgroup_detail":
+                                        rg = self.analysis.row_groups[self.selected_rowgroup]
+                                        max_col_index = len(rg.columns) - 1
+                                        if self.selected_rowgroup_column < max_col_index:
+                                            self.selected_rowgroup_column += 1
+                                            needs_update = True
+                                    arrow_handled = True
+                            elif char3 == 'C':  # Right arrow
+                                if self.current_view == "rowgroups" and self.analysis:
+                                    if self.compression_level == "file":
+                                        # Drill down to row groups browser
+                                        self.compression_level = "rowgroups"
+                                        self.selected_rowgroup = 0
                                         needs_update = True
-                                    arrow_handled = True  # Mark as handled even if we didn't move
-                            # Other arrow keys (C=right, D=left) could be handled here if needed
+                                    elif self.compression_level == "rowgroups":
+                                        # Drill down to row group detail
+                                        self.compression_level = "rowgroup_detail"
+                                        self.selected_rowgroup_column = 0
+                                        needs_update = True
+                                    arrow_handled = True
+                            elif char3 == 'D':  # Left arrow
+                                if self.current_view == "rowgroups":
+                                    if self.compression_level == "rowgroup_detail":
+                                        # Go back to row groups browser
+                                        self.compression_level = "rowgroups"
+                                        needs_update = True
+                                    elif self.compression_level == "rowgroups":
+                                        # Go back to file level
+                                        self.compression_level = "file"
+                                        needs_update = True
+                                    elif self.compression_level == "file":
+                                        # Go back to main view
+                                        self.current_view = "main"
+                                        needs_update = True
+                                    arrow_handled = True
                         # If not a complete arrow sequence, will fall through to ESC handling
                     except (OSError, ValueError):
                         # If we can't read the sequence, treat as ESC
