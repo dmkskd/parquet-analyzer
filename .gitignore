@@ -165,7 +165,7 @@ Cargo.lock
 # Project-specific
 *.parquet
 *.csv
-!examples/**/*.parquet  # Keep test data files
+!examples/**/*.parquet
 
 # Temporary files
 .DS_Store
