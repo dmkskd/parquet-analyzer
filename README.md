@@ -7,13 +7,13 @@ Interactive TUI for analyzing Parquet file metadata, compression, and optimizati
 
 ## Features
 
-- 🔍 **Interactive Analysis**: Rich TUI for exploring Parquet file structure
-- 📊 **Compression Analysis**: Column-by-column compression ratios and recommendations
-- �️ **Schema Exploration**: Recursive schema tree with logical and physical types
-- 📄 **Page-Level Insights**: Page-level statistics and optimization tips
-- � **Optimization Recommendations**: Actionable suggestions for improving compression
-- 📋 **Data Preview**: Smart preview of actual data with nested structure support
-- 🎯 **File Browser**: Built-in file browser for easy navigation
+- **Interactive Analysis**: Rich TUI for exploring Parquet file structure
+- **Compression Analysis**: Column-by-column compression ratios and recommendations
+- **Schema Exploration**: Recursive schema tree with logical and physical types
+- **Page-Level Insights**: Page-level statistics and optimization tips
+- **Optimization Recommendations**: Actionable suggestions for improving compression
+- **Data Preview**: Smart preview of actual data with nested structure support
+- **File Browser**: Built-in file browser for easy navigation
 
 ## Quick Start
 
