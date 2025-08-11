@@ -449,22 +449,22 @@ class ParquetTUI:
         table.add_column("Ratio", style="red", width=6)
         table.add_column("Min → Max", style="yellow", no_wrap=False)
         
-        # Ensure selected_rowgroup_column is within bounds (use local variable to avoid modifying state)
-        selected_column_index = max(0, min(self.selected_rowgroup_column, len(rg.columns) - 1))
+        # Ensure selected_rowgroup_column is within bounds
+        self.selected_rowgroup_column = max(0, min(self.selected_rowgroup_column, len(rg.columns) - 1))
         
         # Sort columns by compression ratio (worst first)
         sorted_columns = sorted(rg.columns, key=lambda x: x.compression_ratio, reverse=True)
         # Ensure selected column is visible - adjust display window if needed
         start_index = 0
-        if selected_column_index >= max_rows:
-            start_index = max(0, selected_column_index - max_rows + 1)
+        if self.selected_rowgroup_column >= max_rows:
+            start_index = max(0, self.selected_rowgroup_column - max_rows + 1)
         
         displayed_columns = sorted_columns[start_index:start_index + max_rows]
         
         for i, col in enumerate(displayed_columns):
             # Highlight selected column - check if this column index matches selection
             actual_index = start_index + i
-            is_selected = actual_index == selected_column_index
+            is_selected = actual_index == self.selected_rowgroup_column
             style = "bold white on blue" if is_selected else None
             
             # Truncate column name
@@ -1629,22 +1629,32 @@ class ParquetTUI:
                 compression_panel = self.create_compression_panel()
                 self.console.print(compression_panel)
                 
-                # Show column detail in a separate smaller panel
-                if self.analysis and self.analysis.columns:
-                    sorted_columns = sorted(self.analysis.columns, key=lambda x: x.compression_ratio, reverse=True)
-                    selected_col = sorted_columns[min(self.selected_column, len(sorted_columns) - 1)]
-                    detail_content = f"[bold cyan]{selected_col.name}[/bold cyan]\n"
-                    detail_content += f"Physical Type: {selected_col.physical_type}\n"
-                    detail_content += f"Logical Type: {selected_col.logical_type}\n"
-                    detail_content += f"Encodings: {', '.join(selected_col.encodings)}\n"
-                    if selected_col.min_value is not None:
-                        detail_content += f"Min: {selected_col.min_value}\n"
-                    if selected_col.max_value is not None:
-                        detail_content += f"Max: {selected_col.max_value}\n"
-                    if selected_col.null_count is not None:
-                        detail_content += f"Nulls: {selected_col.null_count}\n"
-                    
-                    detail_panel = Panel(detail_content, title="🔍 Column Detail", border_style="blue")
+                # Show appropriate detail panel based on compression level
+                if self.compression_level == "file":
+                    # File level: show file column detail
+                    if self.analysis and self.analysis.columns:
+                        sorted_columns = sorted(self.analysis.columns, key=lambda x: x.compression_ratio, reverse=True)
+                        selected_col = sorted_columns[min(self.selected_column, len(sorted_columns) - 1)]
+                        detail_content = f"[bold cyan]{selected_col.name}[/bold cyan]\n"
+                        detail_content += f"Physical Type: {selected_col.physical_type}\n"
+                        detail_content += f"Logical Type: {selected_col.logical_type}\n"
+                        detail_content += f"Encodings: {', '.join(selected_col.encodings)}\n"
+                        if selected_col.min_value is not None:
+                            detail_content += f"Min: {selected_col.min_value}\n"
+                        if selected_col.max_value is not None:
+                            detail_content += f"Max: {selected_col.max_value}\n"
+                        if selected_col.null_count is not None:
+                            detail_content += f"Nulls: {selected_col.null_count}\n"
+                        
+                        detail_panel = Panel(detail_content, title="🔍 Column Detail", border_style="blue")
+                        self.console.print(detail_panel)
+                elif self.compression_level == "rowgroups":
+                    # Row groups level: show row group summary
+                    detail_panel = self.create_rowgroup_summary_panel()
+                    self.console.print(detail_panel)
+                elif self.compression_level == "rowgroup_detail":
+                    # Row group detail: show column detail for selected row group column
+                    detail_panel = self.create_rowgroup_column_detail_panel()
                     self.console.print(detail_panel)
             elif self.current_view == "pages":
                 panel = self.create_pages_panel()
@@ -1664,7 +1674,15 @@ class ParquetTUI:
             # Status and controls at bottom
             status_text = f"[bold green]View:[/bold green] [cyan]{self.current_view.title()}[/cyan]"
             if self.current_view == "rowgroups":
-                status_text += f" | [bold green]Level:[/bold green] [cyan]{self.compression_level}[/cyan] | [bold green]Column:[/bold green] [cyan]{self.selected_column + 1}/{len(self.analysis.columns)}[/cyan]"
+                status_text += f" | [bold green]Level:[/bold green] [cyan]{self.compression_level}[/cyan]"
+                if self.compression_level == "file":
+                    status_text += f" | [bold green]Column:[/bold green] [cyan]{self.selected_column + 1}/{len(self.analysis.columns)}[/cyan]"
+                elif self.compression_level == "rowgroups":
+                    status_text += f" | [bold green]Row Group:[/bold green] [cyan]{self.selected_rowgroup + 1}/{len(self.analysis.row_groups)}[/cyan]"
+                elif self.compression_level == "rowgroup_detail":
+                    rg = self.analysis.row_groups[self.selected_rowgroup] if self.analysis and self.analysis.row_groups else None
+                    if rg:
+                        status_text += f" | [bold green]RG{self.selected_rowgroup}:[/bold green] [cyan]{self.selected_rowgroup_column + 1}/{len(rg.columns)}[/cyan]"
             elif self.current_view == "data":
                 rows_per_page = 20
                 current_page = (self.data_row_offset // rows_per_page) + 1
